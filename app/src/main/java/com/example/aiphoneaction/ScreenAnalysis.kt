@@ -1,11 +1,14 @@
 package com.example.aiphoneaction
 
-/** OCR-derived phase guess. Confidence is a heuristic, not a calibrated probability. */
+/**
+ * OCR-derived phase guess. Confidence and evidence are heuristic, not calibrated probabilities.
+ * Defaults preserve source compatibility for callers constructing test/manual observations.
+ */
 data class ScreenObservation(
     val rawText: String,
     val inferredState: GameState,
-    val confidence: Float,
-    val evidence: Map<GameState, Int>
+    val confidence: Float = 0f,
+    val evidence: Map<GameState, Int> = emptyMap()
 )
 
 class GameScreenAnalyzer {
@@ -24,26 +27,18 @@ class GameScreenAnalyzer {
     fun analyze(rawText: String): ScreenObservation {
         val normalized = rawText.lowercase().replace(Regex("[^a-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
         val scores = keywords.mapValues { (_, terms) ->
-            terms.sumOf { (term, weight) ->
-                Regex("\\b${Regex.escape(term)}\\b").findAll(normalized).count() * weight
-            }
+            terms.sumOf { (term, weight) -> Regex("\\b${Regex.escape(term)}\\b").findAll(normalized).count() * weight }
         }.filterValues { it > 0 }
-
         val ranked = scores.entries.sortedByDescending { it.value }
         val top = ranked.firstOrNull()
-        val secondScore = ranked.getOrNull(1)?.value ?: 0
-        val state = top?.key ?: GameState.UNKNOWN
         val topScore = top?.value ?: 0
+        val secondScore = ranked.getOrNull(1)?.value ?: 0
         val separation = if (topScore == 0) 0f else topScore.toFloat() / (topScore + secondScore).toFloat()
-        val evidenceStrength = (topScore / 5f).coerceIn(0f, 1f)
-        val confidence = (separation * evidenceStrength).coerceIn(0f, 1f)
-
-        // Avoid presenting weak keyword matches as a confident phase.
-        val acceptedState = if (confidence >= MIN_CONFIDENCE) state else GameState.UNKNOWN
-        return ScreenObservation(rawText, acceptedState, confidence, scores)
+        val strength = (topScore / 5f).coerceIn(0f, 1f)
+        val confidence = (separation * strength).coerceIn(0f, 1f)
+        val state = if (confidence >= MIN_CONFIDENCE) top?.key ?: GameState.UNKNOWN else GameState.UNKNOWN
+        return ScreenObservation(rawText, state, confidence, scores)
     }
 
-    companion object {
-        private const val MIN_CONFIDENCE = 0.35f
-    }
+    companion object { private const val MIN_CONFIDENCE = 0.35f }
 }

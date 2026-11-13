@@ -28,9 +28,7 @@ class PhaseDActivity : AppCompatActivity() {
     private lateinit var logText: TextView
 
     private val objectDetector by lazy { VisualObjectDetector() }
-    private val frameProcessor by lazy {
-        FrameProcessor(objectDetector) { result -> renderFrameResult(result) }
-    }
+    private val frameProcessor by lazy { FrameProcessor(objectDetector) { renderFrameResult(it) } }
     private val captureController by lazy { CaptureController(this) }
     private val projectionManager by lazy { getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager }
     private var receiverRegistered = false
@@ -47,7 +45,9 @@ class PhaseDActivity : AppCompatActivity() {
                 }
                 ScreenCaptureService.ACTION_CAPTURE_ERROR -> {
                     val message = intent.getStringExtra(ScreenCaptureService.EXTRA_ERROR) ?: "Capture error."
+                    frameProcessor.resetConfidence()
                     statusText.text = message
+                    stateText.text = "Phase: UNKNOWN · confidence 0%"
                     appendLog(message)
                     if (message.contains("stopped", ignoreCase = true) || message.contains("No screen frames", ignoreCase = true)) {
                         setCaptureChecked(false)
@@ -123,7 +123,7 @@ class PhaseDActivity : AppCompatActivity() {
         }
         root.addView(captureToggle)
         root.addView(TextView(this).apply {
-            text = "Capture runs on-device until stopped. OCR confidence is a heuristic; generic object labels do not identify enemies. Recommendations are informational and issue no game actions."
+            text = "Capture runs on-device until stopped. OCR confidence is heuristic; generic object labels do not identify enemies. Recommendations are informational and issue no game actions."
             textSize = 12f
             setPadding(0, 0, 0, 8)
         })
@@ -157,23 +157,22 @@ class PhaseDActivity : AppCompatActivity() {
 
     private fun renderFrameResult(result: FrameProcessor.Result) {
         if (result.ocrError != null) {
-            statusText.text = "Frame analysis failed (one bounded retry was used); waiting for next frame."
+            statusText.text = result.recoveryMessage ?: "Frame analysis failed; waiting for the next frame."
             stateText.text = "Phase: UNKNOWN · confidence 0%"
             recommendationText.text = result.ocrError
-            appendLog("Frame analysis error: ${result.ocrError}")
+            appendLog(result.recoveryMessage ?: result.ocrError)
             return
         }
-        val estimate = result.estimate
-        val recommendation = FreeFireDecisionEngine().recommend(estimate, result.detections)
+        val recommendation = FreeFireDecisionEngine().recommend(result.estimate, result.detections)
         statusText.text = "Frame analyzed at ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}; capture continues."
-        stateText.text = "Phase: ${estimate.state} · confidence ${(estimate.confidence * 100).toInt()}% · evidence ${estimate.stableFrames}"
+        stateText.text = "Phase: ${result.estimate.state} · confidence ${(result.estimate.confidence * 100).toInt()}% · evidence ${result.estimate.stableFrames}"
         recommendationText.text = "${recommendation.headline}\n${recommendation.detail}"
         objectText.text = if (result.detections.isEmpty()) {
             "Generic visual detections: none${result.objectError?.let { " ($it)" } ?: ""}"
         } else {
             "Generic visual detections: " + result.detections.take(5).joinToString { "${it.label} ${(it.confidence * 100).toInt()}%" }
         }
-        appendLog("${estimate.state}, confidence ${(estimate.confidence * 100).toInt()}%, objects ${result.detections.size}.")
+        appendLog("${result.estimate.state}, confidence ${(result.estimate.confidence * 100).toInt()}%, objects ${result.detections.size}.")
     }
 
     private fun appendLog(message: String) {
@@ -187,6 +186,7 @@ class PhaseDActivity : AppCompatActivity() {
     override fun onDestroy() {
         if (receiverRegistered) unregisterReceiver(captureReceiver)
         frameProcessor.close()
+        objectDetector.close()
         if (isFinishing && captureController.isRunning) captureController.stop()
         super.onDestroy()
     }

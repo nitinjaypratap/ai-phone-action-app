@@ -2,13 +2,13 @@
 
 An Android prototype for user-consented continuous screen capture, on-device OCR, rolling phase confidence, generic object proposals, and supervised Free Fire-oriented recommendations.
 
-## Capture and processing
+## Confidence and recovery
 
-- The launcher opens the live dashboard (`PhaseDActivity`). Start capture from the dashboard and approve Android's screen-sharing prompt.
-- `CaptureController` owns foreground-service start/stop requests. `ScreenCaptureService` produces throttled frames (~2 FPS, max 1280 px wide), reports stalls/errors, and stops when the user or Android ends projection.
-- `FrameProcessor` is single-flight: it drops stale frames while work is in flight, decodes/OCRs and runs generic object detection, retries decode/OCR at most once, and always removes temporary frame files after processing.
-- If capture is revoked or stalls, the user must stop and grant a new screen-sharing session; the app does not silently bypass Android consent.
-- `PhaseConfidenceTracker` uses recent OCR evidence; confidence is heuristic, not a calibrated probability. Object labels are generic and do not identify enemies.
+- Phase confidence uses a bounded sliding window. UNKNOWN/low-confidence observations occupy window entries so old states expire; conflicting phases must satisfy vote-share and confidence thresholds to be shown as stable.
+- Frame analysis is single-flight, drops stale frames, retries each decode/OCR failure at most once with bounded backoff, deletes temporary files, and returns the UI to UNKNOWN on exhausted retries.
+- After repeated consecutive frame failures, the confidence history resets; after a longer failure streak the UI recommends stopping and restarting capture. It never silently reuses or renews Android screen-sharing consent.
+- Successful analysis clears the failure streak. Capture errors and user stop also clear confidence history.
+- JVM unit tests cover stable/ambiguous/unknown confidence transitions and retry/recovery policy.
 
 ## Run
 
@@ -20,4 +20,4 @@ An Android prototype for user-consented continuous screen capture, on-device OCR
 
 ## Limitations
 
-This version intentionally does not automate aiming, shooting, target selection, match queueing, or requeueing. The Free Fire-oriented engine offers informational guidance only. OCR/object detection are heuristic and require device testing; this update has not been built on a device in this environment.
+Capture runs at a throttled rate (~2 FPS, max 1280 px wide). OCR confidence is heuristic; generic object labels do not identify enemies. The Free Fire-oriented engine provides informational guidance only and does not automate gameplay actions. Device build/runtime verification remains necessary.
