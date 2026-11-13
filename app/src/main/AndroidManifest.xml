@@ -6,7 +6,7 @@
     <application
         android:allowBackup="false"
         android:label="AI Phone Action"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:supportsRtl="true">
         <activity
             android:name=".PhaseDActivity"
@@ -16,12 +16,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
         <service
             android:name=".ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
-
         <service
             android:name=".TouchAccessibilityService"
             android:label="AI Phone Action"

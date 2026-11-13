@@ -18,13 +18,14 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** User-consented continuous capture. It only emits frames; it never executes game actions. */
+/** User-consented continuous capture. It only emits frames and never executes game actions. */
 class ScreenCaptureService : Service() {
     companion object {
         const val ACTION_CAPTURED = "com.example.aiphoneaction.CAPTURED"
@@ -39,6 +40,7 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 10
         private const val FRAME_INTERVAL_MS = 500L
         private const val MAX_CAPTURE_WIDTH = 1280
+        private const val FRAME_STALL_TIMEOUT_MS = 8_000L
     }
 
     private var projection: MediaProjection? = null
@@ -47,7 +49,20 @@ class ScreenCaptureService : Service() {
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
     private var lastFrameAt = 0L
+    private var stallReported = false
     private val running = AtomicBoolean(false)
+    private val mainHandler = Handler(android.os.Looper.getMainLooper())
+    private val stallWatchdog = object : Runnable {
+        override fun run() {
+            if (!running.get()) return
+            val now = SystemClock.elapsedRealtime()
+            if (lastFrameAt > 0L && now - lastFrameAt > FRAME_STALL_TIMEOUT_MS && !stallReported) {
+                stallReported = true
+                emitError("No screen frames received. Stop capture and grant screen-sharing permission again to recover.")
+            }
+            mainHandler.postDelayed(this, FRAME_STALL_TIMEOUT_MS)
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -60,7 +75,7 @@ class ScreenCaptureService : Service() {
         createNotificationChannel()
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("AI Phone Action")
-            .setContentText("Screen sharing is active — tap Stop in the app to end")
+            .setContentText("Screen sharing is active — stop it from the app at any time")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
@@ -82,7 +97,6 @@ class ScreenCaptureService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-
         startProjection(resultCode, resultData, startId)
         return START_NOT_STICKY
     }
@@ -97,27 +111,33 @@ class ScreenCaptureService : Service() {
             val height = (metrics.heightPixels * scale).toInt().coerceAtLeast(1)
 
             captureThread = HandlerThread("AIPhoneFrameCapture").also { it.start() }
-            captureHandler = Handler(captureThread!!.looper)
+            val handler = Handler(captureThread!!.looper)
+            captureHandler = handler
             val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
             imageReader = reader
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            projection = manager.getMediaProjection(resultCode, resultData)
+            val newProjection = manager.getMediaProjection(resultCode, resultData)
                 ?: throw IllegalStateException("Android did not create a MediaProjection.")
-            projection?.registerCallback(object : MediaProjection.Callback() {
+            projection = newProjection
+            running.set(true)
+            newProjection.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
+                    val wasRunning = running.get()
                     stopCapture()
-                    emitError("Screen sharing was stopped by Android or the user. Start a new capture to resume.")
+                    if (wasRunning) emitError("Screen sharing was stopped by Android or the user. Start a new capture to resume.")
                     stopSelf(startId)
                 }
-            }, captureHandler)
-            virtualDisplay = projection?.createVirtualDisplay(
+            }, handler)
+            virtualDisplay = newProjection.createVirtualDisplay(
                 "AIPhoneActionLiveCapture", width, height, metrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface, null, captureHandler
+                reader.surface, null, handler
             ) ?: throw IllegalStateException("Could not create the virtual display.")
-
-            running.set(true)
-            reader.setOnImageAvailableListener({ source -> onFrameAvailable(source) }, captureHandler)
+            lastFrameAt = SystemClock.elapsedRealtime()
+            stallReported = false
+            reader.setOnImageAvailableListener({ source -> onFrameAvailable(source) }, handler)
+            mainHandler.removeCallbacks(stallWatchdog)
+            mainHandler.postDelayed(stallWatchdog, FRAME_STALL_TIMEOUT_MS)
         } catch (error: Exception) {
             emitError(error.localizedMessage ?: "Could not start screen capture.")
             stopCapture()
@@ -126,13 +146,18 @@ class ScreenCaptureService : Service() {
     }
 
     private fun onFrameAvailable(reader: ImageReader) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (!running.get() || now - lastFrameAt < FRAME_INTERVAL_MS) {
+        if (!running.get()) {
+            reader.acquireLatestImage()?.close()
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFrameAt < FRAME_INTERVAL_MS) {
             reader.acquireLatestImage()?.close()
             return
         }
         val image = reader.acquireLatestImage() ?: return
         lastFrameAt = now
+        stallReported = false
         try {
             val bitmap = imageToBitmap(image) ?: return
             val file = File(cacheDir, "live-frame-${System.currentTimeMillis()}.jpg")
@@ -145,7 +170,7 @@ class ScreenCaptureService : Service() {
                     .putExtra(EXTRA_TIMESTAMP, now)
             )
         } catch (error: Exception) {
-            emitError(error.localizedMessage ?: "Frame processing failed.")
+            emitError(error.localizedMessage ?: "Frame capture failed.")
         } finally {
             image.close()
         }
@@ -156,13 +181,9 @@ class ScreenCaptureService : Service() {
         val width = image.width
         val height = image.height
         val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val rowPadding = rowStride - pixelStride * width
-        val paddedWidth = width + rowPadding / pixelStride
-        val padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
-        val buffer = plane.buffer
-        buffer.rewind()
-        padded.copyPixelsFromBuffer(buffer)
+        val rowPadding = plane.rowStride - pixelStride * width
+        val padded = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888)
+        plane.buffer.apply { rewind() }.let(padded::copyPixelsFromBuffer)
         val cropped = Bitmap.createBitmap(padded, 0, 0, width, height)
         padded.recycle()
         return cropped
@@ -170,9 +191,7 @@ class ScreenCaptureService : Service() {
 
     private fun pruneOldFrames() {
         cacheDir.listFiles()?.filter { it.name.startsWith("live-frame-") }
-            ?.sortedByDescending { it.lastModified() }
-            ?.drop(4)
-            ?.forEach { it.delete() }
+            ?.sortedByDescending { it.lastModified() }?.drop(4)?.forEach { it.delete() }
     }
 
     private fun emitError(message: String) {
@@ -180,7 +199,8 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCapture() {
-        if (!running.getAndSet(false) && projection == null && imageReader == null) return
+        val wasActive = running.getAndSet(false)
+        mainHandler.removeCallbacks(stallWatchdog)
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         virtualDisplay = null
@@ -188,11 +208,12 @@ class ScreenCaptureService : Service() {
         imageReader = null
         val oldProjection = projection
         projection = null
+        // Clear our reference before stop(): MediaProjection invokes onStop synchronously on some devices.
         oldProjection?.stop()
         captureThread?.quitSafely()
         captureThread = null
         captureHandler = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        if (wasActive || oldProjection != null) stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun createNotificationChannel() {
