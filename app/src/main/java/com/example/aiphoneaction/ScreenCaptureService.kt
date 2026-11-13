@@ -1,0 +1,149 @@
+package com.example.aiphoneaction
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.util.DisplayMetrics
+import android.view.WindowManager
+import java.io.File
+import java.io.FileOutputStream
+
+class ScreenCaptureService : Service() {
+    companion object {
+        const val ACTION_CAPTURED = "com.example.aiphoneaction.CAPTURED"
+        const val EXTRA_PATH = "capture_path"
+        const val EXTRA_RESULT_CODE = "result_code"
+        const val EXTRA_RESULT_DATA = "result_data"
+        private const val CHANNEL_ID = "screen_capture"
+        private const val NOTIFICATION_ID = 10
+    }
+
+    private var projection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        createNotificationChannel()
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("AI Phone Action")
+            .setContentText("Capturing one screen frame")
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setOngoing(true)
+            .build()
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+        @Suppress("DEPRECATION")
+        val resultData = if (Build.VERSION.SDK_INT >= 33) {
+            intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+        } else {
+            intent?.getParcelableExtra(EXTRA_RESULT_DATA)
+        }
+        if (resultData == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        beginCapture(resultCode, resultData, startId)
+        return START_NOT_STICKY
+    }
+
+    private fun beginCapture(resultCode: Int, resultData: Intent, startId: Int) {
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(metrics)
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val density = metrics.densityDpi
+
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        imageReader = reader
+        projection = (getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager)
+            .getMediaProjection(resultCode, resultData)
+        projection?.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                cleanup()
+                stopSelf(startId)
+            }
+        }, Handler(Looper.getMainLooper()))
+        virtualDisplay = projection?.createVirtualDisplay(
+            "AIPhoneActionCapture", width, height, density,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            reader.surface, null, Handler(Looper.getMainLooper())
+        )
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            val image = reader.acquireLatestImage()
+            if (image == null) {
+                stopSelf(startId)
+                return@postDelayed
+            }
+            try {
+                val plane = image.planes[0]
+                val buffer = plane.buffer
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val rowPadding = rowStride - pixelStride * width
+                val paddedBitmap = Bitmap.createBitmap(
+                    width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888
+                )
+                paddedBitmap.copyPixelsFromBuffer(buffer)
+                val bitmap = Bitmap.createBitmap(paddedBitmap, 0, 0, width, height)
+                val file = File(cacheDir, "screen-${System.currentTimeMillis()}.png")
+                FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bitmap.recycle()
+                paddedBitmap.recycle()
+                sendBroadcast(Intent(ACTION_CAPTURED).setPackage(packageName).putExtra(EXTRA_PATH, file.absolutePath))
+            } catch (_: Exception) {
+                // The caller can retry if the device or app blocks capture.
+            } finally {
+                image.close()
+                cleanup()
+                stopSelf(startId)
+            }
+        }, 700L)
+    }
+
+    private fun cleanup() {
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
+        projection?.stop()
+        projection = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Screen capture", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        cleanup()
+        super.onDestroy()
+    }
+}
