@@ -9,7 +9,7 @@
         android:theme="@style/Theme.AppCompat.Light.NoActionBar"
         android:supportsRtl="true">
         <activity
-            android:name=".MainActivity"
+            android:name=".PhaseBActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
