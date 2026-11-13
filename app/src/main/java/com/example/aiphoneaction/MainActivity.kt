@@ -1,17 +1,17 @@
 package com.example.aiphoneaction
 
 import android.Manifest
-import android.accessibilityservice.AccessibilityService
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.projection.MediaProjectionManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -26,8 +26,15 @@ import java.io.File
 
 class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
+    private lateinit var phaseText: TextView
+    private lateinit var decisionText: TextView
     private lateinit var commandInput: EditText
-    private val gameScreenAnalyzer = GameScreenAnalyzer()
+
+    private val analyzer = GameScreenAnalyzer()
+    private val decisionEngine = GameDecisionEngine()
+    private val monitorHandler = Handler(Looper.getMainLooper())
+    private var liveMonitoring = false
+    private var monitorRunnable: Runnable? = null
 
     private val projectionManager by lazy {
         getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -49,7 +56,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
             }
             ContextCompat.startForegroundService(this, intent)
-            status.text = "Capturing one frame..."
+            status.text = "Capturing screen..."
         } else {
             status.text = "Screen capture was not approved."
         }
@@ -57,6 +64,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        registerCaptureReceiver()
+        buildUi()
+    }
+
+    private fun registerCaptureReceiver() {
         val receiverFilter = IntentFilter(ScreenCaptureService.ACTION_CAPTURED)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(captureReceiver, receiverFilter, Context.RECEIVER_NOT_EXPORTED)
@@ -64,7 +76,6 @@ class MainActivity : AppCompatActivity() {
             @Suppress("DEPRECATION")
             registerReceiver(captureReceiver, receiverFilter)
         }
-        buildUi()
     }
 
     private fun buildUi() {
@@ -74,12 +85,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "AI Phone Action — prototype"
+            text = "AI Phone Action — gameplay dashboard"
             textSize = 22f
         })
 
         root.addView(TextView(this).apply {
-            text = "Foundation automation, OCR, and explicit gesture controls."
+            text = "Live OCR, game-state inference, tactical suggestions, and command automation."
             textSize = 14f
             setPadding(0, 10, 0, 12)
         })
@@ -90,32 +101,41 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(status)
 
+        phaseText = TextView(this).apply {
+            text = "Game state: UNKNOWN"
+            textSize = 16f
+        }
+        root.addView(phaseText)
+
+        decisionText = TextView(this).apply {
+            text = "Recommendation: Awaiting first capture."
+            textSize = 14f
+        }
+        root.addView(decisionText)
+
         root.addView(button("Enable touch actions") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
 
-        root.addView(button("Capture screen + read text") {
-            startScreenCapture()
+        root.addView(button("Capture one frame") {
+            requestScreenCapture()
         })
 
-        root.addView(button("Open settings") {
-            startActivity(Intent(Settings.ACTION_SETTINGS))
+        root.addView(button("Start live monitoring") {
+            startLiveMonitoring()
         })
 
-        root.addView(button("Go home") {
-            performGesture { service ->
-                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-                status.text = "Home pressed."
-            }
+        root.addView(button("Stop live monitoring") {
+            stopLiveMonitoring()
         })
 
         root.addView(TextView(this).apply {
-            text = "Automation command"
-            setPadding(0, 16, 0, 0)
+            text = "Manual automation command"
+            setPadding(0, 18, 0, 0)
         })
 
         commandInput = EditText(this).apply {
-            setText("tap 100 200; wait 500; swipe 100 200 800 1200")
+            setText("tap 250 500; wait 500; swipe 250 500 900 1100")
             minLines = 3
             setSingleLine(false)
         }
@@ -130,7 +150,7 @@ class MainActivity : AppCompatActivity() {
             AutomationEngine(this).execute(script) { message -> status.text = message }
         })
 
-        root.addView(TextView(this).apply { text = "Tap coordinates (screen pixels)" })
+        root.addView(TextView(this).apply { text = "Quick manual controls" })
         val tapX = numberField("X")
         val tapY = numberField("Y")
         root.addView(row(tapX, tapY))
@@ -144,30 +164,49 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        root.addView(TextView(this).apply { text = "Swipe start and end coordinates" })
-        val x1 = numberField("Start X")
-        val y1 = numberField("Start Y")
-        val x2 = numberField("End X")
-        val y2 = numberField("End Y")
-        root.addView(row(x1, y1))
-        root.addView(row(x2, y2))
-        root.addView(button("Swipe") {
+        root.addView(button("Open settings") {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+        })
+
+        root.addView(button("Go home") {
             performGesture { service ->
-                service.swipe(x1.intValue(), y1.intValue(), x2.intValue(), y2.intValue()) { ok ->
-                    status.text = if (ok) "Swipe sent." else "Gesture could not be dispatched."
-                }
+                val ok = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+                status.text = if (ok) "Home pressed." else "Home action unavailable."
             }
         })
 
         setContentView(root)
     }
 
-    private fun startScreenCapture() {
+    private fun requestScreenCapture() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            status.text = "Notifications permission is required to show the capture foreground service."
+            status.text = "Notifications permission is required for capture services."
             return
         }
         projectionConsent.launch(projectionManager.createScreenCaptureIntent())
+    }
+
+    private fun startLiveMonitoring() {
+        if (liveMonitoring) return
+        liveMonitoring = true
+        status.text = "Live monitoring started."
+        scheduleMonitorTick()
+    }
+
+    private fun stopLiveMonitoring() {
+        liveMonitoring = false
+        monitorRunnable?.let { monitorHandler.removeCallbacks(it) }
+        monitorRunnable = null
+        status.text = "Live monitoring stopped."
+    }
+
+    private fun scheduleMonitorTick() {
+        if (!liveMonitoring) return
+        monitorRunnable = Runnable {
+            requestScreenCapture()
+            monitorHandler.postDelayed(this@MainActivity.monitorRunnable ?: return@Runnable, 2200L)
+        }
+        monitorHandler.postDelayed(monitorRunnable!!, 2200L)
     }
 
     private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
@@ -205,14 +244,20 @@ class MainActivity : AppCompatActivity() {
             imageFile.delete()
             return
         }
+
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
             .process(InputImage.fromBitmap(bitmap, 0))
             .addOnSuccessListener { result ->
-                val extractedText = result.text.ifBlank { "No text detected." }
-                val observation = gameScreenAnalyzer.analyze(extractedText)
-                status.text = "OCR: ${extractedText.take(1000)}\nGame state: ${observation.inferredState.name}"
+                val text = result.text.ifBlank { "No text detected." }
+                val observation = analyzer.analyze(text)
+                val decision = decisionEngine.decide(observation.inferredState)
+                phaseText.text = "Game state: ${observation.inferredState.name}"
+                decisionText.text = "Recommendation: ${decision.primaryAction} | ${decision.summary}"
+                status.text = if (text.length > 120) text.take(120) + "..." else text
             }
-            .addOnFailureListener { error -> status.text = "OCR failed: ${error.localizedMessage}" }
+            .addOnFailureListener { error ->
+                status.text = "OCR failed: ${error.localizedMessage}"
+            }
             .addOnCompleteListener {
                 bitmap.recycle()
                 imageFile.delete()
@@ -220,6 +265,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        stopLiveMonitoring()
         unregisterReceiver(captureReceiver)
         super.onDestroy()
     }
