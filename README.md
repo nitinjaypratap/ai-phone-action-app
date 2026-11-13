@@ -1,24 +1,26 @@
 # AI Phone Action — Android prototype
 
-An Android prototype for user-initiated screen capture, on-device OCR, game-state suggestions, and explicitly enabled limited assisted gestures.
+An Android prototype for user-consented continuous screen capture, on-device OCR, phase confidence tracking, generic object proposals, and Free Fire-oriented informational guidance.
 
-## Current integration layer
+## Live perception
 
-Phase D connects one captured frame to OCR, state classification, strategy planning, and an optional bounded action. Screen capture remains user initiated and requires Android's screen-sharing consent. The **limited assisted actions** toggle is off by default. When enabled, the app waits until it sees the same phase in two captured frames before considering one action, and it won't repeat an action for that phase until another phase is detected.
-
-The limited action allowlist is movement for parachuting/combat and one estimated interact tap while looting. It does **not** automate aim, shooting, combat targeting, match queueing, or requeueing. OCR and fixed relative screen regions can be wrong; test only on your own device and keep assistance off unless you are actively supervising it. You can stop by unchecking the toggle or leaving the app.
+- Start **Continuous screen capture** and approve Android's screen-sharing prompt. A foreground service emits frames at a throttled rate of about 2 FPS (scaled to at most 1280 pixels wide). Stop capture from the checkbox/app; Android can also stop the projection.
+- OCR scores phase-specific UI phrases and reports a heuristic confidence. A rolling five-frame tracker requires repeated evidence before displaying a stable phase.
+- ML Kit object detection reports generic object labels and bounding boxes. It does not identify enemies, targets, weapons reliably, or tactical intent.
+- The Free Fire-oriented decision engine provides phase-specific suggestions only. It does not dispatch game controls, aim, fire, select targets, queue, or requeue.
 
 ## Run
 
-1. Open in Android Studio and sync Gradle.
+1. Open this repository in Android Studio and sync Gradle.
 2. Install on an Android 8.0+ device.
-3. Enable **AI Phone Action** in Accessibility settings if using assisted gestures.
-4. Tap **Capture and analyze one frame** and approve Android's screen-sharing prompt.
-5. Review the detected phase and strategy. Leave assisted actions off for manual operation, or opt in to limited assistance while supervising.
+3. Open the app and enable **Continuous screen capture**.
+4. Approve Android's screen-sharing request and supervise the ongoing capture notification.
+5. Review the phase estimate, confidence, generic visual detections, and recommendations. Turn capture off to stop.
 
-## Limitations
+## Privacy and limitations
 
-- This is not a continuous 30–60 FPS capture service. Android requires capture consent and device support; this build analyzes one frame at a time.
-- OCR-only state detection is heuristic and can misclassify screens.
-- Gesture locations are approximate and must be calibrated for the game's control layout.
-- There is no autonomous gameplay, object detection, enemy detection, or guaranteed action success.
+- Frames and OCR/object analysis remain on-device in this prototype; temporary frame files are deleted after processing.
+- Continuous capture uses Android MediaProjection and stops when the user ends sharing, the OS revokes the projection, or the service is stopped.
+- OCR confidence is a heuristic, not a calibrated probability. Detection quality depends on device/model and game UI.
+- Generic object detection is not enemy detection. This app deliberately avoids autonomous gameplay actions and combat target automation.
+- Coordinates and strategy are not inferred from game telemetry; use the game only in ways allowed by its rules.
