@@ -1,7 +1,7 @@
 package com.example.aiphoneaction
 
 import android.Manifest
-import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.AccessibilityService
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -26,6 +26,9 @@ import java.io.File
 
 class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
+    private lateinit var commandInput: EditText
+    private val gameScreenAnalyzer = GameScreenAnalyzer()
+
     private val projectionManager by lazy {
         getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
@@ -46,7 +49,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
             }
             ContextCompat.startForegroundService(this, intent)
-            status.text = "Capturing one frame…"
+            status.text = "Capturing one frame..."
         } else {
             status.text = "Screen capture was not approved."
         }
@@ -69,23 +72,62 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 28, 24, 24)
         }
+
         root.addView(TextView(this).apply {
             text = "AI Phone Action — prototype"
             textSize = 22f
         })
+
         root.addView(TextView(this).apply {
-            text = "Capture and read one screen, or perform a gesture you explicitly request."
+            text = "Foundation automation, OCR, and explicit gesture controls."
             textSize = 14f
             setPadding(0, 10, 0, 12)
         })
-        status = TextView(this).apply { text = "Ready"; textSize = 14f }
+
+        status = TextView(this).apply {
+            text = "Ready"
+            textSize = 14f
+        }
         root.addView(status)
 
         root.addView(button("Enable touch actions") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
+
         root.addView(button("Capture screen + read text") {
-            projectionConsent.launch(projectionManager.createScreenCaptureIntent())
+            startScreenCapture()
+        })
+
+        root.addView(button("Open settings") {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+        })
+
+        root.addView(button("Go home") {
+            performGesture { service ->
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                status.text = "Home pressed."
+            }
+        })
+
+        root.addView(TextView(this).apply {
+            text = "Automation command"
+            setPadding(0, 16, 0, 0)
+        })
+
+        commandInput = EditText(this).apply {
+            setText("tap 100 200; wait 500; swipe 100 200 800 1200")
+            minLines = 3
+            setSingleLine(false)
+        }
+        root.addView(commandInput)
+
+        root.addView(button("Run command") {
+            val script = AutomationParser.parse(commandInput.text.toString())
+            if (script.isEmpty()) {
+                status.text = "No valid command was entered."
+                return@button
+            }
+            AutomationEngine(this).execute(script) { message -> status.text = message }
         })
 
         root.addView(TextView(this).apply { text = "Tap coordinates (screen pixels)" })
@@ -96,7 +138,9 @@ class MainActivity : AppCompatActivity() {
             performGesture { service ->
                 val x = tapX.intValue()
                 val y = tapY.intValue()
-                service.tap(x, y) { ok -> status.text = if (ok) "Tap sent at ($x, $y)." else "Gesture could not be dispatched." }
+                service.tap(x, y) { ok ->
+                    status.text = if (ok) "Tap sent at ($x, $y)." else "Gesture could not be dispatched."
+                }
             }
         })
 
@@ -116,6 +160,14 @@ class MainActivity : AppCompatActivity() {
         })
 
         setContentView(root)
+    }
+
+    private fun startScreenCapture() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            status.text = "Notifications permission is required to show the capture foreground service."
+            return
+        }
+        projectionConsent.launch(projectionManager.createScreenCaptureIntent())
     }
 
     private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
@@ -156,8 +208,9 @@ class MainActivity : AppCompatActivity() {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
             .process(InputImage.fromBitmap(bitmap, 0))
             .addOnSuccessListener { result ->
-                val text = result.text.ifBlank { "No text detected." }
-                status.text = text.take(1200)
+                val extractedText = result.text.ifBlank { "No text detected." }
+                val observation = gameScreenAnalyzer.analyze(extractedText)
+                status.text = "OCR: ${extractedText.take(1000)}\nGame state: ${observation.inferredState.name}"
             }
             .addOnFailureListener { error -> status.text = "OCR failed: ${error.localizedMessage}" }
             .addOnCompleteListener {

@@ -25,6 +25,11 @@ class TouchAccessibilityService : AccessibilityService() {
         dispatch(path, 80L, callback)
     }
 
+    fun longPress(x: Int, y: Int, durationMs: Long = 700L, callback: (Boolean) -> Unit) {
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        dispatch(path, durationMs, callback)
+    }
+
     fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, callback: (Boolean) -> Unit) {
         val path = Path().apply {
             moveTo(x1.toFloat(), y1.toFloat())
